@@ -1,0 +1,23 @@
+# ABOUTME: Git ignore file for clinical trials pipeline
+
+# Environment
+.env
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Data (sensitive/large files)
+data/*.json
+data/*.csv
+*.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db

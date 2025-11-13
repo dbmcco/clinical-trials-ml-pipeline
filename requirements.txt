@@ -1,0 +1,20 @@
+# ABOUTME: Python dependencies for clinical trials ML pipeline
+
+# Database
+tinydb==4.8.0
+psycopg2-binary==2.9.11
+
+# API clients
+anthropic==0.18.0
+requests==2.32.5
+
+# Data processing
+pandas==2.3.3
+numpy==1.26.3
+
+# Testing
+pytest==8.0.0
+pytest-cov==4.1.0
+
+# Environment
+python-dotenv==1.2.1

@@ -1,0 +1,5 @@
+[0;34m=== Clinical Trials Analysis Pipeline ===[0m
+
+[1;33mRunning in TEST MODE (limited to 10 trials)[0m
+
+[0;32mStage 1: Extracting PHASE1 trials from AACT[0m

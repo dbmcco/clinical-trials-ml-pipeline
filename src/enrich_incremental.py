@@ -1,0 +1,628 @@
+# ABOUTME: Stage 2 - Incremental enrichment of trials with ChEMBL, UniProt, PPI, and failure details
+
+import os
+import sys
+import requests
+import psycopg2
+from datetime import datetime
+from typing import List, Dict, Optional, Any
+from tinydb import TinyDB, Query
+import argparse
+from dotenv import load_dotenv
+from utils import safe_sleep, calculate_exponential_backoff, format_timestamp
+
+# Load environment variables
+load_dotenv()
+
+class IncrementalEnricher:
+    """Incremental enrichment with retry logic"""
+
+    def __init__(self, db_path: str = "data/clinical_trials.json",
+                 queue_path: str = "data/enrichment_queue.json"):
+        """
+        Initialize enricher with database connections
+
+        Args:
+            db_path: Path to main TinyDB database
+            queue_path: Path to retry queue database
+        """
+        self.db = TinyDB(db_path)
+        self.queue_db = TinyDB(queue_path)
+        self.trials_table = self.db.table('trials')
+        self.retry_table = self.queue_db.table('retry_queue')
+
+        # AACT database connection
+        self.aact_conn = psycopg2.connect(
+            host=os.getenv('AACT_DB_HOST', 'aact-db.ctti-clinicaltrials.org'),
+            port=os.getenv('AACT_DB_PORT', '5432'),
+            database=os.getenv('AACT_DB_NAME', 'aact'),
+            user=os.getenv('AACT_DB_USER'),
+            password=os.getenv('AACT_DB_PASSWORD')
+        )
+
+        # Rate limiting delays
+        self.chembl_delay = float(os.getenv('CHEMBL_DELAY_SECONDS', '0.05'))
+        self.pubmed_delay = float(os.getenv('PUBMED_DELAY_SECONDS', '0.1'))
+
+    def enrich_all_pending(self):
+        """Enrich all trials with pending stages"""
+        Trial = Query()
+
+        print("="*50)
+        print("STAGE 2: INCREMENTAL ENRICHMENT")
+        print("="*50)
+
+        # Target enrichment
+        pending_targets = self.trials_table.search(
+            Trial.enrichment_status.stage2_targets == 'pending'
+        )
+        print(f"\n[1/3] Target Enrichment: {len(pending_targets)} trials pending")
+        for i, trial in enumerate(pending_targets, 1):
+            print(f"  Processing {i}/{len(pending_targets)}: {trial['nct_id']} ({trial['drug_name']})")
+            self.enrich_targets(trial)
+
+        # PPI enrichment (depends on targets)
+        pending_ppi = self.trials_table.search(
+            (Trial.enrichment_status.stage2_targets == 'completed') &
+            (Trial.enrichment_status.stage2_ppi == 'pending')
+        )
+        print(f"\n[2/3] PPI Enrichment: {len(pending_ppi)} trials pending")
+        for i, trial in enumerate(pending_ppi, 1):
+            print(f"  Processing {i}/{len(pending_ppi)}: {trial['nct_id']}")
+            self.enrich_ppi(trial)
+
+        # Failure details enrichment (independent)
+        pending_failures = self.trials_table.search(
+            Trial.enrichment_status.stage2_failure_details == 'pending'
+        )
+        print(f"\n[3/3] Failure Details Enrichment: {len(pending_failures)} trials pending")
+        for i, trial in enumerate(pending_failures, 1):
+            print(f"  Processing {i}/{len(pending_failures)}: {trial['nct_id']}")
+            self.enrich_failure_details(trial)
+
+        print("\n✅ Stage 2 enrichment complete")
+
+    # -------------------------------------------------------------------------
+    # Target Enrichment (ChEMBL + UniProt)
+    # -------------------------------------------------------------------------
+
+    def enrich_targets(self, trial: Dict):
+        """
+        ChEMBL + UniProt enrichment with retry logic
+
+        Args:
+            trial: Trial document from TinyDB
+        """
+        try:
+            chembl_data = self.query_chembl(trial['drug_name'])
+
+            self.trials_table.update(
+                {'chembl_enrichment': chembl_data,
+                 'enrichment_status': {
+                     **trial['enrichment_status'],
+                     'stage2_targets': 'completed',
+                     'last_updated': format_timestamp()
+                 }},
+                doc_ids=[trial.doc_id]
+            )
+        except Exception as e:
+            print(f"    ❌ ERROR: {str(e)}")
+            self.add_to_retry_queue(trial['nct_id'], 'stage2_targets', str(e))
+
+    def query_chembl(self, drug_name: str) -> Dict:
+        """
+        Query ChEMBL API for drug targets and IC50 data
+
+        Args:
+            drug_name: Drug name to search
+
+        Returns:
+            ChEMBL enrichment data
+        """
+        # Search for molecule
+        search_url = f"https://www.ebi.ac.uk/chembl/api/data/molecule/search?q={drug_name}&format=json"
+        safe_sleep(self.chembl_delay)
+
+        response = requests.get(search_url, timeout=10)
+        if response.status_code != 200:
+            return {"found": False, "chembl_id": None, "targets": []}
+
+        data = response.json()
+        if not data.get('molecules'):
+            return {"found": False, "chembl_id": None, "targets": []}
+
+        molecule = data['molecules'][0]
+        chembl_id = molecule['molecule_chembl_id']
+        pref_name = molecule.get('pref_name', drug_name)
+
+        # Get targets and IC50 data
+        targets = self.get_chembl_targets(chembl_id)
+
+        return {
+            "found": True,
+            "chembl_id": chembl_id,
+            "pref_name": pref_name,
+            "targets": targets,
+            "has_uniprot_targets": any(t.get('uniprot_id') for t in targets)
+        }
+
+    def get_chembl_targets(self, chembl_id: str) -> List[Dict]:
+        """
+        Get targets and IC50 data for a ChEMBL molecule
+
+        Args:
+            chembl_id: ChEMBL molecule ID
+
+        Returns:
+            List of target dictionaries with IC50 data
+        """
+        activities_url = f"https://www.ebi.ac.uk/chembl/api/data/activity?molecule_chembl_id={chembl_id}&standard_type=IC50&format=json&limit=1000"
+        safe_sleep(self.chembl_delay)
+
+        response = requests.get(activities_url, timeout=10)
+        if response.status_code != 200:
+            return []
+
+        data = response.json()
+        activities = data.get('activities', [])
+
+        # Aggregate by target
+        targets_dict = {}
+        for activity in activities:
+            target_chembl_id = activity.get('target_chembl_id')
+            if not target_chembl_id:
+                continue
+
+            if target_chembl_id not in targets_dict:
+                targets_dict[target_chembl_id] = {
+                    'chembl_id': target_chembl_id,
+                    'ic50_values': [],
+                    'uniprot_id': None
+                }
+
+            # Add IC50 value
+            value = activity.get('standard_value')
+            units = activity.get('standard_units')
+            if value and units:
+                targets_dict[target_chembl_id]['ic50_values'].append({
+                    'value': float(value),
+                    'units': units
+                })
+
+        # Get UniProt IDs for each target
+        targets = list(targets_dict.values())
+        for target in targets:
+            target['uniprot_id'] = self.get_uniprot_id(target['chembl_id'])
+
+        return targets
+
+    def get_uniprot_id(self, target_chembl_id: str) -> Optional[str]:
+        """
+        Get UniProt ID for a ChEMBL target
+
+        Args:
+            target_chembl_id: ChEMBL target ID
+
+        Returns:
+            UniProt ID or None
+        """
+        target_url = f"https://www.ebi.ac.uk/chembl/api/data/target/{target_chembl_id}?format=json"
+        safe_sleep(self.chembl_delay)
+
+        try:
+            response = requests.get(target_url, timeout=10)
+            if response.status_code != 200:
+                return None
+
+            data = response.json()
+            components = data.get('target_components', [])
+            if components:
+                accessions = components[0].get('target_component_xrefs', [])
+                for xref in accessions:
+                    if xref.get('xref_src_db') == 'UniProt':
+                        return xref.get('xref_id')
+        except:
+            pass
+
+        return None
+
+    # -------------------------------------------------------------------------
+    # PPI Enrichment (STRING database)
+    # -------------------------------------------------------------------------
+
+    def enrich_ppi(self, trial: Dict):
+        """
+        PPI network enrichment from STRING database
+
+        Args:
+            trial: Trial document from TinyDB
+        """
+        try:
+            # Extract UniProt IDs from ChEMBL enrichment
+            uniprot_ids = []
+            chembl_enrichment = trial.get('chembl_enrichment', {})
+            if chembl_enrichment.get('has_uniprot_targets'):
+                for target in chembl_enrichment.get('targets', []):
+                    uid = target.get('uniprot_id')
+                    if uid and uid not in uniprot_ids:
+                        uniprot_ids.append(uid)
+
+            if not uniprot_ids:
+                # No UniProt targets, mark as completed but empty
+                self.trials_table.update(
+                    {'ppi_enrichment': {'uniprot_count': 0, 'interactions': []},
+                     'enrichment_status': {
+                         **trial['enrichment_status'],
+                         'stage2_ppi': 'completed',
+                         'last_updated': format_timestamp()
+                     }},
+                    doc_ids=[trial.doc_id]
+                )
+                return
+
+            # Query STRING for each UniProt ID
+            interactions = []
+            for uniprot_id in uniprot_ids:
+                ppi_data = self.query_string(uniprot_id)
+                interactions.extend(ppi_data)
+
+            # Calculate network features
+            network_features = self.calculate_network_features(interactions)
+
+            self.trials_table.update(
+                {'ppi_enrichment': {
+                    'uniprot_count': len(uniprot_ids),
+                    'interactions': interactions,
+                    'network_features': network_features
+                 },
+                 'enrichment_status': {
+                     **trial['enrichment_status'],
+                     'stage2_ppi': 'completed',
+                     'last_updated': format_timestamp()
+                 }},
+                doc_ids=[trial.doc_id]
+            )
+        except Exception as e:
+            print(f"    ❌ ERROR: {str(e)}")
+            self.add_to_retry_queue(trial['nct_id'], 'stage2_ppi', str(e))
+
+    def query_string(self, uniprot_id: str) -> List[Dict]:
+        """
+        Query STRING database for protein interactions
+
+        Args:
+            uniprot_id: UniProt ID
+
+        Returns:
+            List of protein-protein interactions
+        """
+        string_url = f"https://string-db.org/api/json/network?identifiers={uniprot_id}&species=9606&required_score=700"
+        safe_sleep(0.1)
+
+        try:
+            response = requests.get(string_url, timeout=10)
+            if response.status_code != 200:
+                return []
+
+            data = response.json()
+            interactions = []
+            for edge in data:
+                interactions.append({
+                    'protein_a': edge.get('preferredName_A'),
+                    'protein_b': edge.get('preferredName_B'),
+                    'combined_score': edge.get('score'),
+                    'interaction_type': 'physical'
+                })
+
+            return interactions
+        except:
+            return []
+
+    def calculate_network_features(self, interactions: List[Dict]) -> Dict:
+        """
+        Calculate PPI network topology features
+
+        Args:
+            interactions: List of PPI interactions
+
+        Returns:
+            Network features dictionary
+        """
+        if not interactions:
+            return {'avg_degree': 0, 'clustering_coefficient': 0}
+
+        # Build adjacency list
+        adjacency = {}
+        for interaction in interactions:
+            a = interaction['protein_a']
+            b = interaction['protein_b']
+
+            if a not in adjacency:
+                adjacency[a] = []
+            if b not in adjacency:
+                adjacency[b] = []
+
+            adjacency[a].append(b)
+            adjacency[b].append(a)
+
+        # Calculate average degree
+        degrees = [len(neighbors) for neighbors in adjacency.values()]
+        avg_degree = sum(degrees) / len(degrees) if degrees else 0
+
+        # Simple clustering coefficient approximation
+        clustering = 0.0
+        if len(adjacency) > 0:
+            clustering = len(interactions) / len(adjacency)
+
+        return {
+            'avg_degree': round(avg_degree, 2),
+            'clustering_coefficient': round(clustering, 2)
+        }
+
+    # -------------------------------------------------------------------------
+    # Failure Details Enrichment (AACT + PubMed + CT.gov API)
+    # -------------------------------------------------------------------------
+
+    def enrich_failure_details(self, trial: Dict):
+        """
+        Enrich with comprehensive failure reason data
+
+        Args:
+            trial: Trial document from TinyDB
+        """
+        try:
+            nct_id = trial['nct_id']
+            drug_name = trial['drug_name']
+
+            # Source 1: AACT Detailed Description
+            description = self.get_aact_detailed_description(nct_id)
+
+            # Source 2: AACT Documents
+            documents = self.get_aact_documents(nct_id)
+
+            # Source 3: PubMed Enhanced
+            pubmed = self.search_pubmed(nct_id, drug_name)
+
+            # Source 4: ClinicalTrials.gov API
+            ct_data = self.search_clinicaltrials_api(nct_id)
+
+            # Source 5: Company Website Search URLs
+            sponsor = trial.get('sponsor', '')
+            company_search = self.generate_company_search_urls(sponsor, nct_id, drug_name)
+
+            self.trials_table.update(
+                {'failure_enrichment': {
+                    'aact_description': description,
+                    'aact_documents': documents,
+                    'pubmed_results': pubmed,
+                    'clinicaltrials_api': ct_data,
+                    'company_search_urls': company_search
+                 },
+                 'enrichment_status': {
+                     **trial['enrichment_status'],
+                     'stage2_failure_details': 'completed',
+                     'last_updated': format_timestamp()
+                 }},
+                doc_ids=[trial.doc_id]
+            )
+        except Exception as e:
+            print(f"    ❌ ERROR: {str(e)}")
+            self.add_to_retry_queue(trial['nct_id'], 'stage2_failure_details', str(e))
+
+    def get_aact_detailed_description(self, nct_id: str) -> Optional[str]:
+        """Get detailed description from AACT"""
+        cursor = self.aact_conn.cursor()
+        cursor.execute(
+            "SELECT description FROM ctgov.detailed_descriptions WHERE nct_id = %s",
+            (nct_id,)
+        )
+        result = cursor.fetchone()
+        cursor.close()
+        return result[0] if result else None
+
+    def get_aact_documents(self, nct_id: str) -> List[Dict]:
+        """Get documents from AACT"""
+        cursor = self.aact_conn.cursor()
+        cursor.execute(
+            "SELECT document_type, url FROM ctgov.documents WHERE nct_id = %s",
+            (nct_id,)
+        )
+        docs = []
+        for row in cursor.fetchall():
+            docs.append({'type': row[0], 'url': row[1]})
+        cursor.close()
+        return docs
+
+    def search_pubmed(self, nct_id: str, drug_name: str) -> List[Dict]:
+        """Search PubMed for trial publications"""
+        search_term = f"{nct_id} OR ({drug_name} AND clinical trial)"
+        search_url = f"https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?db=pubmed&term={search_term}&retmode=json&retmax=5"
+
+        safe_sleep(self.pubmed_delay)
+
+        try:
+            response = requests.get(search_url, timeout=10)
+            if response.status_code != 200:
+                return []
+
+            data = response.json()
+            pmids = data.get('esearchresult', {}).get('idlist', [])
+
+            # Fetch summaries
+            results = []
+            if pmids:
+                summary_url = f"https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi?db=pubmed&id={','.join(pmids)}&retmode=json"
+                safe_sleep(self.pubmed_delay)
+
+                summary_response = requests.get(summary_url, timeout=10)
+                if summary_response.status_code == 200:
+                    summaries = summary_response.json().get('result', {})
+                    for pmid in pmids:
+                        if pmid in summaries:
+                            results.append({
+                                'pmid': pmid,
+                                'title': summaries[pmid].get('title'),
+                                'authors': summaries[pmid].get('authors', [])[:3]
+                            })
+
+            return results
+        except:
+            return []
+
+    def search_clinicaltrials_api(self, nct_id: str) -> Dict:
+        """Search ClinicalTrials.gov API for additional data"""
+        api_url = f"https://clinicaltrials.gov/api/v2/studies/{nct_id}"
+        safe_sleep(0.1)
+
+        try:
+            response = requests.get(api_url, timeout=10)
+            if response.status_code != 200:
+                return {}
+
+            data = response.json()
+            study = data.get('protocolSection', {})
+
+            return {
+                'has_results': 'resultsSection' in data,
+                'brief_summary': study.get('descriptionModule', {}).get('briefSummary'),
+                'detailed_description': study.get('descriptionModule', {}).get('detailedDescription')
+            }
+        except:
+            return {}
+
+    def generate_company_search_urls(self, sponsor: str, nct_id: str, drug_name: str) -> List[str]:
+        """Generate company website search URLs"""
+        if not sponsor:
+            return []
+
+        urls = [
+            f"https://www.google.com/search?q={sponsor}+{nct_id}+terminated",
+            f"https://www.google.com/search?q={sponsor}+{drug_name}+clinical+trial+terminated"
+        ]
+
+        return urls
+
+    # -------------------------------------------------------------------------
+    # Retry Queue Management
+    # -------------------------------------------------------------------------
+
+    def add_to_retry_queue(self, nct_id: str, stage: str, error: str):
+        """
+        Add failed enrichment to retry queue
+
+        Args:
+            nct_id: Trial NCT ID
+            stage: Enrichment stage that failed
+            error: Error message
+        """
+        retry_entry = {
+            'nct_id': nct_id,
+            'stage': stage,
+            'error': error,
+            'retry_count': 0,
+            'next_retry': calculate_exponential_backoff(0).isoformat(),
+            'created': format_timestamp()
+        }
+        self.retry_table.insert(retry_entry)
+
+    def process_retry_queue(self):
+        """Process retry queue with exponential backoff"""
+        Retry = Query()
+        now = datetime.utcnow()
+
+        ready_retries = self.retry_table.search(
+            Retry.next_retry <= now.isoformat()
+        )
+
+        print(f"\nProcessing retry queue: {len(ready_retries)} entries ready")
+
+        for retry in ready_retries:
+            if retry['retry_count'] >= 5:
+                # Max retries reached
+                print(f"  ❌ Max retries reached for {retry['nct_id']} ({retry['stage']})")
+                self.mark_enrichment_failed(retry['nct_id'], retry['stage'])
+                self.retry_table.remove(doc_ids=[retry.doc_id])
+            else:
+                # Retry enrichment
+                print(f"  🔄 Retrying {retry['nct_id']} ({retry['stage']}) - Attempt {retry['retry_count'] + 1}")
+                Trial = Query()
+                trial_docs = self.trials_table.search(Trial.nct_id == retry['nct_id'])
+
+                if trial_docs:
+                    trial = trial_docs[0]
+
+                    if retry['stage'] == 'stage2_targets':
+                        self.enrich_targets(trial)
+                    elif retry['stage'] == 'stage2_ppi':
+                        self.enrich_ppi(trial)
+                    elif retry['stage'] == 'stage2_failure_details':
+                        self.enrich_failure_details(trial)
+
+                # Update retry count
+                self.retry_table.update(
+                    {'retry_count': retry['retry_count'] + 1,
+                     'next_retry': calculate_exponential_backoff(retry['retry_count'] + 1).isoformat()},
+                    doc_ids=[retry.doc_id]
+                )
+
+    def mark_enrichment_failed(self, nct_id: str, stage: str):
+        """Mark enrichment stage as permanently failed"""
+        Trial = Query()
+        trial_docs = self.trials_table.search(Trial.nct_id == nct_id)
+
+        if trial_docs:
+            trial = trial_docs[0]
+            self.trials_table.update(
+                {'enrichment_status': {
+                    **trial['enrichment_status'],
+                    stage: 'failed',
+                    'last_updated': format_timestamp()
+                }},
+                doc_ids=[trial.doc_id]
+            )
+
+    def close(self):
+        """Close database connections"""
+        self.aact_conn.close()
+        self.db.close()
+        self.queue_db.close()
+
+
+def main():
+    """Main entry point for incremental enrichment"""
+    parser = argparse.ArgumentParser(
+        description="Incremental enrichment of clinical trials"
+    )
+    parser.add_argument(
+        '--db',
+        default='data/clinical_trials.json',
+        help='Path to TinyDB database'
+    )
+    parser.add_argument(
+        '--queue',
+        default='data/enrichment_queue.json',
+        help='Path to retry queue database'
+    )
+    parser.add_argument(
+        '--retry',
+        action='store_true',
+        help='Process retry queue only'
+    )
+
+    args = parser.parse_args()
+
+    enricher = IncrementalEnricher(db_path=args.db, queue_path=args.queue)
+
+    try:
+        if args.retry:
+            enricher.process_retry_queue()
+        else:
+            enricher.enrich_all_pending()
+            enricher.process_retry_queue()
+
+    finally:
+        enricher.close()
+
+
+if __name__ == "__main__":
+    main()
