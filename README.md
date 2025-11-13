@@ -95,7 +95,9 @@ python src/enrich_incremental.py --db data/clinical_trials.json --queue data/enr
 3. **Failure Details Enrichment**:
    - AACT detailed descriptions
    - PubMed publications
-   - ClinicalTrials.gov API v2
+   - ClinicalTrials.gov API v2:
+     - Adverse events module (SAE tables with deaths, rates, safety signals)
+     - Arms/interventions module (dose information)
    - Company search URLs
 
 **Error Handling:** Retry queue with exponential backoff (5min → 80min)
@@ -108,7 +110,11 @@ python src/analyze_failures_llm.py --db data/clinical_trials.json --cache data/l
 ```
 
 **What it does:**
-- Two-pass Claude SDK analysis:
+- **Heuristic Safety Overrides:** Check SAE data first for clear safety signals:
+  - Any trial deaths → automatic FAILURE_SAFETY (high confidence)
+  - SAE rate > 10% → automatic FAILURE_SAFETY (high confidence)
+  - Skips LLM for unambiguous cases (cost savings)
+- Two-pass Claude SDK analysis (for non-override cases):
   - **Pass 1:** Classification into FAILURE_SAFETY/EFFICACY/ADMINISTRATIVE
   - **Pass 2:** Self-verification with contradiction checking
 - Caches results to avoid duplicate API calls
@@ -149,7 +155,15 @@ python src/export_ml_dataset.py \
   "uniprot_ids": ["P08311", "B5BUM8"],
   "ppi_network_size": 45,
   "ic50_count": 12,
-  "avg_ic50": 285.3
+  "avg_ic50": 285.3,
+  "has_sae_data": true,
+  "sae_total_deaths": 2,
+  "sae_rate": 0.15,
+  "sae_has_safety_signal": true,
+  "heuristic_override": true,
+  "has_dose_data": true,
+  "dose_arms_count": 3,
+  "dose_interventions_count": 2
 }
 ```
 
@@ -244,8 +258,9 @@ See `docs/ARCHITECTURE.md` for complete system architecture, including:
 1. Must have UniProt targets from ChEMBL or fallback
 2. Must have PPI network data from STRING
 3. Must have valid failure category (FAILURE_SAFETY/EFFICACY/ADMINISTRATIVE)
-4. FAILURE_SAFETY trials require medium+ confidence
+4. FAILURE_SAFETY trials require medium+ confidence (exception: heuristic overrides)
 5. Must have at least one target with assay data
+6. **NEW:** FAILURE_SAFETY trials require SAE data OR dose information
 
 **Drop Reasons Tracked:**
 - `missing_uniprot_targets`: No targets found in ChEMBL or UniProt
@@ -253,5 +268,6 @@ See `docs/ARCHITECTURE.md` for complete system architecture, including:
 - `invalid_failure_category`: LLM classification failed
 - `low_confidence_safety_classification`: Safety failure with low confidence
 - `no_target_data`: No targets with IC50 or assay information
+- `missing_sae_and_dose_data`: **NEW** - Safety failure lacks both SAE and dose data
 
 This ensures the validation dataset contains only trials suitable for testing Synthyra's PPI prediction model.

@@ -75,7 +75,7 @@ class FailureAnalyzer:
 
     def analyze_trial(self, trial: Dict):
         """
-        Two-pass LLM analysis with self-verification
+        Two-pass LLM analysis with self-verification and heuristic overrides
 
         Args:
             trial: Trial document from TinyDB
@@ -94,6 +94,35 @@ class FailureAnalyzer:
                      }},
                     doc_ids=[trial.doc_id]
                 )
+                return
+
+            # Check for heuristic safety override BEFORE LLM analysis
+            heuristic_override = self.check_safety_heuristics(trial)
+            if heuristic_override:
+                print(f"  🛑 HEURISTIC OVERRIDE: {heuristic_override['reason']}")
+                llm_analysis = {
+                    'classification': 'FAILURE_SAFETY',
+                    'confidence': 'high',
+                    'reasoning': heuristic_override['reason'],
+                    'heuristic_override': True,
+                    'sae_summary': heuristic_override.get('sae_summary'),
+                    'analysis_timestamp': format_timestamp(),
+                    'claude_model': None,
+                    'tokens_used': 0
+                }
+
+                # Cache and update database
+                self.cache_analysis(trial['nct_id'], llm_analysis)
+                self.trials_table.update(
+                    {'llm_analysis': llm_analysis,
+                     'enrichment_status': {
+                         **trial['enrichment_status'],
+                         'stage3_llm_analysis': 'completed',
+                         'last_updated': format_timestamp()
+                     }},
+                    doc_ids=[trial.doc_id]
+                )
+                print("  ✅ Heuristic classification complete (no LLM needed)")
                 return
 
             # Pass 1: Initial Classification
@@ -180,6 +209,51 @@ class FailureAnalyzer:
                  }},
                 doc_ids=[trial.doc_id]
             )
+
+    def check_safety_heuristics(self, trial: Dict) -> Optional[Dict]:
+        """
+        Check for deterministic safety signals that override LLM classification
+
+        Args:
+            trial: Trial document
+
+        Returns:
+            Override dict with reason if safety signal found, None otherwise
+        """
+        failure_enrichment = trial.get('failure_enrichment', {})
+        ct_api_data = failure_enrichment.get('clinicaltrials_api', {})
+        adverse_events = ct_api_data.get('adverse_events', {})
+
+        if not adverse_events.get('found'):
+            return None
+
+        sae_summary = adverse_events.get('summary', {})
+
+        # Heuristic 1: Any trial-related deaths
+        if sae_summary.get('total_deaths', 0) > 0:
+            return {
+                'reason': f"Heuristic override: {sae_summary['total_deaths']} death(s) reported in trial",
+                'sae_summary': sae_summary
+            }
+
+        # Heuristic 2: SAE rate > 10% (high safety signal)
+        if sae_summary.get('sae_rate', 0) > 0.1:
+            sae_rate_pct = sae_summary['sae_rate'] * 100
+            return {
+                'reason': f"Heuristic override: SAE rate {sae_rate_pct:.1f}% exceeds 10% threshold",
+                'sae_summary': sae_summary
+            }
+
+        # Heuristic 3: Generic safety signal flag from SAE calculation
+        if sae_summary.get('has_safety_signal', False):
+            affected = sae_summary.get('total_serious_affected', 0)
+            at_risk = sae_summary.get('total_serious_at_risk', 0)
+            return {
+                'reason': f"Heuristic override: Serious adverse events ({affected}/{at_risk} affected)",
+                'sae_summary': sae_summary
+            }
+
+        return None
 
     def build_classification_prompt(self, trial: Dict) -> str:
         """

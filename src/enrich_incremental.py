@@ -583,7 +583,7 @@ class IncrementalEnricher:
             return []
 
     def search_clinicaltrials_api(self, nct_id: str) -> Dict:
-        """Search ClinicalTrials.gov API for additional data"""
+        """Search ClinicalTrials.gov API for additional data including SAE tables"""
         api_url = f"https://clinicaltrials.gov/api/v2/studies/{nct_id}"
         safe_sleep(0.1)
 
@@ -594,14 +594,166 @@ class IncrementalEnricher:
 
             data = response.json()
             study = data.get('protocolSection', {})
+            results = data.get('resultsSection', {})
+
+            # Parse adverse events module
+            adverse_events = self._parse_adverse_events(results.get('adverseEventsModule', {}))
+
+            # Parse dose information from arms/interventions
+            dose_info = self._parse_dose_info(study.get('armsInterventionsModule', {}))
 
             return {
                 'has_results': 'resultsSection' in data,
                 'brief_summary': study.get('descriptionModule', {}).get('briefSummary'),
-                'detailed_description': study.get('descriptionModule', {}).get('detailedDescription')
+                'detailed_description': study.get('descriptionModule', {}).get('detailedDescription'),
+                'adverse_events': adverse_events,
+                'dose_info': dose_info
             }
         except:
             return {}
+
+    def _parse_adverse_events(self, ae_module: Dict) -> Dict:
+        """
+        Parse adverse events module from CT.gov API
+
+        Args:
+            ae_module: adverseEventsModule from CT.gov API v2
+
+        Returns:
+            Structured SAE data
+        """
+        if not ae_module:
+            return {'found': False}
+
+        sae_data = {
+            'found': True,
+            'frequency_threshold': ae_module.get('frequencyThreshold'),
+            'time_frame': ae_module.get('timeFrame'),
+            'description': ae_module.get('description'),
+            'serious_events': [],
+            'other_events': []
+        }
+
+        # Parse serious adverse events
+        serious_events = ae_module.get('seriousEvents', {}).get('eventGroups', [])
+        for event_group in serious_events:
+            group_data = {
+                'title': event_group.get('title'),
+                'deaths': event_group.get('deathsNumAffected', 0),
+                'serious_affected': event_group.get('seriousNumAffected', 0),
+                'serious_at_risk': event_group.get('seriousNumAtRisk', 0),
+                'events': []
+            }
+
+            # Parse individual serious events
+            for event in event_group.get('seriousEvents', []):
+                group_data['events'].append({
+                    'term': event.get('term'),
+                    'organ_system': event.get('assessmentType'),
+                    'affected': event.get('stats', [{}])[0].get('numAffected', 0),
+                    'at_risk': event.get('stats', [{}])[0].get('numAtRisk', 0)
+                })
+
+            sae_data['serious_events'].append(group_data)
+
+        # Parse other adverse events (non-serious)
+        other_events = ae_module.get('otherEvents', {}).get('eventGroups', [])
+        for event_group in other_events:
+            group_data = {
+                'title': event_group.get('title'),
+                'affected': event_group.get('otherNumAffected', 0),
+                'at_risk': event_group.get('otherNumAtRisk', 0),
+                'events': []
+            }
+
+            for event in event_group.get('otherEvents', []):
+                group_data['events'].append({
+                    'term': event.get('term'),
+                    'organ_system': event.get('assessmentType'),
+                    'affected': event.get('stats', [{}])[0].get('numAffected', 0),
+                    'at_risk': event.get('stats', [{}])[0].get('numAtRisk', 0)
+                })
+
+            sae_data['other_events'].append(group_data)
+
+        # Calculate summary metrics
+        sae_data['summary'] = self._calculate_sae_summary(sae_data)
+
+        return sae_data
+
+    def _calculate_sae_summary(self, sae_data: Dict) -> Dict:
+        """Calculate summary metrics from SAE data"""
+        summary = {
+            'total_deaths': 0,
+            'total_serious_affected': 0,
+            'total_serious_at_risk': 0,
+            'sae_rate': 0.0,
+            'death_rate': 0.0,
+            'has_safety_signal': False
+        }
+
+        # Sum across all serious event groups
+        for group in sae_data.get('serious_events', []):
+            summary['total_deaths'] += group.get('deaths', 0)
+            summary['total_serious_affected'] += group.get('serious_affected', 0)
+            summary['total_serious_at_risk'] = max(
+                summary['total_serious_at_risk'],
+                group.get('serious_at_risk', 0)
+            )
+
+        # Calculate rates
+        if summary['total_serious_at_risk'] > 0:
+            summary['sae_rate'] = summary['total_serious_affected'] / summary['total_serious_at_risk']
+            summary['death_rate'] = summary['total_deaths'] / summary['total_serious_at_risk']
+
+        # Safety signal heuristic: SAE rate > 10% or any deaths
+        summary['has_safety_signal'] = (
+            summary['sae_rate'] > 0.1 or
+            summary['total_deaths'] > 0
+        )
+
+        return summary
+
+    def _parse_dose_info(self, arms_module: Dict) -> Dict:
+        """
+        Parse dosing information from arms/interventions module
+
+        Args:
+            arms_module: armsInterventionsModule from CT.gov API v2
+
+        Returns:
+            Structured dose data
+        """
+        if not arms_module:
+            return {'found': False}
+
+        dose_data = {
+            'found': True,
+            'arms': [],
+            'interventions': []
+        }
+
+        # Parse arm descriptions for dose information
+        for arm in arms_module.get('armGroups', []):
+            arm_info = {
+                'label': arm.get('label'),
+                'type': arm.get('type'),
+                'description': arm.get('description'),
+                'intervention_names': arm.get('interventionNames', [])
+            }
+            dose_data['arms'].append(arm_info)
+
+        # Parse intervention descriptions for dose details
+        for intervention in arms_module.get('interventions', []):
+            intervention_info = {
+                'type': intervention.get('type'),
+                'name': intervention.get('name'),
+                'description': intervention.get('description'),
+                'arm_group_labels': intervention.get('armGroupLabels', [])
+            }
+            dose_data['interventions'].append(intervention_info)
+
+        return dose_data
 
     def generate_company_search_urls(self, sponsor: str, nct_id: str, drug_name: str) -> List[str]:
         """Generate company website search URLs"""

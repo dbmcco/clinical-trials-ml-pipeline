@@ -112,6 +112,7 @@ class MLDatasetExporter:
         chembl_enrichment = trial.get('chembl_enrichment', {})
         ppi_enrichment = trial.get('ppi_enrichment', {})
         llm_analysis = trial.get('llm_analysis', {})
+        failure_enrichment = trial.get('failure_enrichment', {})
 
         # Requirement 1: Must have UniProt targets
         if not chembl_enrichment.get('has_uniprot_targets'):
@@ -129,13 +130,23 @@ class MLDatasetExporter:
         # Requirement 4: Must have at least medium confidence for FAILURE_SAFETY
         if failure_category == 'FAILURE_SAFETY':
             confidence = llm_analysis.get('confidence', 'low')
-            if confidence == 'low':
+            if confidence == 'low' and not llm_analysis.get('heuristic_override'):
+                # Exception: heuristic overrides are always high confidence
                 return (False, 'low_confidence_safety_classification')
 
         # Requirement 5: Must have target IC50 or assay data (at least one target)
         targets = chembl_enrichment.get('targets', [])
         if len(targets) == 0:
             return (False, 'no_target_data')
+
+        # NEW Requirement 6: FAILURE_SAFETY trials must have SAE or dose data
+        if failure_category == 'FAILURE_SAFETY':
+            ct_api_data = failure_enrichment.get('clinicaltrials_api', {})
+            has_sae = ct_api_data.get('adverse_events', {}).get('found', False)
+            has_dose = ct_api_data.get('dose_info', {}).get('found', False)
+
+            if not has_sae and not has_dose:
+                return (False, 'missing_sae_and_dose_data')
 
         return (True, None)
 
@@ -153,6 +164,8 @@ class MLDatasetExporter:
         chembl_enrichment = trial.get('chembl_enrichment', {})
         ppi_enrichment = trial.get('ppi_enrichment', {})
         llm_analysis = trial.get('llm_analysis', {})
+        failure_enrichment = trial.get('failure_enrichment', {})
+        ct_api_data = failure_enrichment.get('clinicaltrials_api', {})
 
         # UniProt IDs
         uniprot_ids = extract_uniprot_ids(trial)
@@ -166,6 +179,13 @@ class MLDatasetExporter:
         # PPI features
         interactions = ppi_enrichment.get('interactions', [])
         network_features = ppi_enrichment.get('network_features', {})
+
+        # SAE features (NEW)
+        adverse_events = ct_api_data.get('adverse_events', {})
+        sae_summary = adverse_events.get('summary', {}) if adverse_events.get('found') else {}
+
+        # Dose features (NEW)
+        dose_info = ct_api_data.get('dose_info', {})
 
         return {
             # Identifiers
@@ -202,9 +222,24 @@ class MLDatasetExporter:
             'start_date': trial.get('start_date'),
             'completion_date': trial.get('completion_date'),
 
+            # SAE Features (NEW)
+            'has_sae_data': adverse_events.get('found', False),
+            'sae_total_deaths': sae_summary.get('total_deaths', 0),
+            'sae_rate': sae_summary.get('sae_rate', 0.0),
+            'sae_death_rate': sae_summary.get('death_rate', 0.0),
+            'sae_has_safety_signal': sae_summary.get('has_safety_signal', False),
+            'heuristic_override': llm_analysis.get('heuristic_override', False),
+
+            # Dose Features (NEW)
+            'has_dose_data': dose_info.get('found', False),
+            'dose_arms_count': len(dose_info.get('arms', [])),
+            'dose_interventions_count': len(dose_info.get('interventions', [])),
+
             # Raw Data (for advanced features)
             'ppi_interactions': interactions,
-            'chembl_targets': chembl_enrichment.get('targets', [])
+            'chembl_targets': chembl_enrichment.get('targets', []),
+            'adverse_events_raw': adverse_events if adverse_events.get('found') else None,
+            'dose_info_raw': dose_info if dose_info.get('found') else None
         }
 
     def print_statistics(self, dataset: List[Dict]):
@@ -244,6 +279,11 @@ class MLDatasetExporter:
         print("DATASET STATISTICS")
         print("="*50)
         print(f"\nTotal Trials: {total}")
+
+        if total == 0:
+            print("No trials in dataset")
+            return
+
         print(f"With UniProt Targets: {with_targets} ({with_targets/total*100:.1f}%)")
         print(f"With PPI Networks: {with_ppi} ({with_ppi/total*100:.1f}%)")
         print(f"Avg IC50 Measurements/Trial: {avg_ic50_count:.1f}")
