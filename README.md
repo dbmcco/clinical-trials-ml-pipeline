@@ -4,7 +4,7 @@
 
 ## Overview
 
-This pipeline extracts Phase 1 terminated clinical trials (2010+) from the AACT database, enriches them with ChEMBL/UniProt targets and PPI networks, classifies failure reasons using Claude AI, and exports ML-ready datasets for Synthyra's PPI prediction model.
+This pipeline extracts Phase 1, 2, and 3 terminated clinical trials (2010+) from the AACT database, enriches them with ChEMBL/UniProt targets and PPI networks, classifies failure reasons using Claude AI, and exports ML-ready datasets for Synthyra's PPI prediction model.
 
 ### Key Features
 
@@ -16,13 +16,13 @@ This pipeline extracts Phase 1 terminated clinical trials (2010+) from the AACT 
 
 ### Pipeline Stages
 
-1. **Stage 1**: Bulk AACT extraction (5,258 trials from 2010-2025)
+1. **Stage 1**: Bulk AACT extraction (Phase 1, 2, and 3 from 2010-2025)
 2. **Stage 2**: Incremental enrichment with targets, PPI, failure details
 3. **Stage 3**: Claude SDK failure classification with self-verification
 4. **Stage 4**: ML dataset export with comprehensive features
 
 ## Goal
-Build a comprehensive dataset of Phase 1 terminated trials to train models predicting trial success/failure based on protein-protein interactions that Synthyra's technology can predict.
+Build a comprehensive dataset of Phase 1, 2, and 3 terminated trials to train models predicting trial success/failure based on protein-protein interactions that Synthyra's technology can predict.
 
 ## Multi-Source Data Pipeline
 

@@ -37,7 +37,7 @@ class AACTBulkExtractor:
 
     def extract_all_trials(self, start_year: int = 2010, limit: Optional[int] = None) -> int:
         """
-        Extract all Phase 1 terminated trials from specified year
+        Extract all Phase 1, 2, and 3 terminated trials from specified year
 
         Args:
             start_year: Starting year for trial extraction (default 2010)
@@ -63,7 +63,7 @@ class AACTBulkExtractor:
             JOIN ctgov.interventions i ON s.nct_id = i.nct_id
             LEFT JOIN ctgov.sponsors sp ON s.nct_id = sp.nct_id
                 AND sp.lead_or_collaborator = 'lead'
-            WHERE s.phase = 'Phase 1'
+            WHERE s.phase IN ('Phase 1', 'Phase 2', 'Phase 3')
               AND s.overall_status IN ('TERMINATED', 'SUSPENDED', 'WITHDRAWN')
               AND s.start_date >= %s
               AND i.intervention_type IN ('DRUG', 'BIOLOGICAL')
@@ -76,7 +76,7 @@ class AACTBulkExtractor:
             query += " LIMIT %s"
             params.append(limit)
 
-        print(f"Extracting Phase 1 terminated trials from {start_year}+...")
+        print(f"Extracting Phase 1, 2, and 3 terminated trials from {start_year}+...")
         if limit:
             print(f"LIMITED TO {limit} trials for testing")
 
@@ -172,7 +172,7 @@ class AACTBulkExtractor:
 def main():
     """Main entry point for bulk extraction"""
     parser = argparse.ArgumentParser(
-        description="Extract Phase 1 terminated trials from AACT database"
+        description="Extract Phase 1, 2, and 3 terminated trials from AACT database"
     )
     parser.add_argument(
         '--output',
