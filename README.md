@@ -22,7 +22,7 @@ This pipeline extracts Phase 1, 2, and 3 terminated clinical trials (2010+) from
 4. **Stage 4**: ML dataset export with comprehensive features
 
 ## Goal
-Build a comprehensive dataset of Phase 1, 2, and 3 terminated trials to train models predicting trial success/failure based on protein-protein interactions that Synthyra's technology can predict.
+Build a comprehensive dataset of Phase 1, 2, and 3 terminated trials with known protein targets and failure reasons. This dataset will be used to **validate** Synthyra's SynteractTurbo PPI prediction model by testing if it could have predicted which molecules would fail based on their protein interaction patterns.
 
 ## Multi-Source Data Pipeline
 

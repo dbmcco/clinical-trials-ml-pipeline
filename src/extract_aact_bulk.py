@@ -63,7 +63,7 @@ class AACTBulkExtractor:
             JOIN ctgov.interventions i ON s.nct_id = i.nct_id
             LEFT JOIN ctgov.sponsors sp ON s.nct_id = sp.nct_id
                 AND sp.lead_or_collaborator = 'lead'
-            WHERE s.phase IN ('Phase 1', 'Phase 2', 'Phase 3')
+            WHERE s.phase IN ('PHASE1', 'PHASE2', 'PHASE3')
               AND s.overall_status IN ('TERMINATED', 'SUSPENDED', 'WITHDRAWN')
               AND s.start_date >= %s
               AND i.intervention_type IN ('DRUG', 'BIOLOGICAL')
