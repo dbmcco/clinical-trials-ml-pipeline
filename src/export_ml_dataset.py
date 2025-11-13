@@ -23,7 +23,8 @@ class MLDatasetExporter:
 
     def export_rich_dataset(self, output_file: str,
                            min_confidence: str = 'low',
-                           require_targets: bool = False):
+                           require_targets: bool = False,
+                           validation_mode: bool = False):
         """
         Export all trials with complete enrichment
 
@@ -31,6 +32,7 @@ class MLDatasetExporter:
             output_file: Output JSON file path
             min_confidence: Minimum confidence level (low/medium/high)
             require_targets: If True, only export trials with UniProt targets
+            validation_mode: If True, enforce strict completeness for validation dataset
         """
         Trial = Query()
 
@@ -46,6 +48,7 @@ class MLDatasetExporter:
 
         # Apply filters
         filtered_trials = complete_trials
+        dropped_reasons = {}
 
         if min_confidence != 'low':
             confidence_order = {'low': 0, 'medium': 1, 'high': 2}
@@ -63,6 +66,25 @@ class MLDatasetExporter:
             ]
             print(f"After targets filter: {len(filtered_trials)}")
 
+        # Validation mode: Strict completeness enforcement
+        if validation_mode:
+            print("\n🔒 VALIDATION MODE: Enforcing completeness requirements")
+            validated_trials = []
+            for trial in filtered_trials:
+                is_complete, reason = self._check_validation_completeness(trial)
+                if is_complete:
+                    validated_trials.append(trial)
+                else:
+                    dropped_reasons[reason] = dropped_reasons.get(reason, 0) + 1
+
+            print(f"After validation completeness: {len(validated_trials)}/{len(filtered_trials)}")
+            if dropped_reasons:
+                print("\nDropped trials by reason:")
+                for reason, count in sorted(dropped_reasons.items(), key=lambda x: -x[1]):
+                    print(f"  {reason}: {count}")
+
+            filtered_trials = validated_trials
+
         # Build ML dataset
         ml_dataset = []
         for trial in filtered_trials:
@@ -76,6 +98,46 @@ class MLDatasetExporter:
 
         print(f"\n✅ Exported {len(ml_dataset)} trials to {output_file}")
         self.print_statistics(ml_dataset)
+
+    def _check_validation_completeness(self, trial: Dict) -> tuple[bool, str]:
+        """
+        Check if trial meets validation dataset completeness requirements
+
+        Args:
+            trial: Trial document from TinyDB
+
+        Returns:
+            (is_complete, drop_reason) tuple
+        """
+        chembl_enrichment = trial.get('chembl_enrichment', {})
+        ppi_enrichment = trial.get('ppi_enrichment', {})
+        llm_analysis = trial.get('llm_analysis', {})
+
+        # Requirement 1: Must have UniProt targets
+        if not chembl_enrichment.get('has_uniprot_targets'):
+            return (False, 'missing_uniprot_targets')
+
+        # Requirement 2: Must have PPI network data
+        if ppi_enrichment.get('uniprot_count', 0) == 0:
+            return (False, 'missing_ppi_network')
+
+        # Requirement 3: FAILURE_SAFETY trials must have safety classification
+        failure_category = llm_analysis.get('classification', '')
+        if not failure_category.startswith('FAILURE_'):
+            return (False, 'invalid_failure_category')
+
+        # Requirement 4: Must have at least medium confidence for FAILURE_SAFETY
+        if failure_category == 'FAILURE_SAFETY':
+            confidence = llm_analysis.get('confidence', 'low')
+            if confidence == 'low':
+                return (False, 'low_confidence_safety_classification')
+
+        # Requirement 5: Must have target IC50 or assay data (at least one target)
+        targets = chembl_enrichment.get('targets', [])
+        if len(targets) == 0:
+            return (False, 'no_target_data')
+
+        return (True, None)
 
     def _build_ml_record(self, trial: Dict) -> Dict:
         """
@@ -308,6 +370,11 @@ def main():
         action='store_true',
         help='Export specialized Synthyra PPI dataset'
     )
+    parser.add_argument(
+        '--validation-mode',
+        action='store_true',
+        help='Enforce strict completeness for validation dataset (requires targets + PPI + quality classifications)'
+    )
 
     args = parser.parse_args()
 
@@ -321,7 +388,8 @@ def main():
             exporter.export_rich_dataset(
                 output_file=args.output,
                 min_confidence=args.min_confidence,
-                require_targets=args.require_targets
+                require_targets=args.require_targets,
+                validation_mode=args.validation_mode
             )
     finally:
         exporter.close()
