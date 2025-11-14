@@ -1,6 +1,6 @@
 # Clinical Trials ML Pipeline
 
-**ABOUTME: Automated pipeline for extracting, enriching, and classifying Phase 1 terminated clinical trials for protein-protein interaction prediction**
+**ABOUTME: End-to-end pipeline for harvesting Phase 1–3 terminated trials, enriching them with mechanistic context, and classifying safety/efficacy failures to replay Synthyra’s PPI model**
 
 ## Overview
 
