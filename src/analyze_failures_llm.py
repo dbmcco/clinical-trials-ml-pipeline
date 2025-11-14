@@ -38,7 +38,7 @@ class FailureAnalyzer:
             raise ValueError("ANTHROPIC_API_KEY not found in environment")
 
         self.client = Anthropic(api_key=api_key)
-        self.model = "claude-3-5-sonnet-20250929"
+        self.model = os.getenv("ANTHROPIC_MODEL", "claude-3-haiku-20240307")
 
         # Statistics
         self.total_tokens = 0
