@@ -99,6 +99,7 @@ python src/enrich_incremental.py --db data/clinical_trials.json --queue data/enr
      - Adverse events module (SAE tables with deaths, rates, safety signals)
      - Arms/interventions module (dose information)
    - Company search URLs
+   - External safety signals via Perplexity AI (FDA warning letters, SEC 8-K filings, company disclosures) — requires `PERPLEXITY_API_KEY`
 
 **Error Handling:** Retry queue with exponential backoff (5min → 80min)
 
@@ -196,6 +197,11 @@ python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
 ```
+
+### Environment Variables
+- `AACT_DB_HOST/PORT/NAME/USER/PASSWORD` – access to the ClinicalTrials.gov AACT PostgreSQL replica
+- `ANTHROPIC_API_KEY` – enables Stage 3 Claude-based failure classification
+- `PERPLEXITY_API_KEY` *(optional but recommended)* – unlocks external FDA/SEC/company safety signal enrichment in Stage 2. Set `PERPLEXITY_DELAY_SECONDS` (default `1.0`) to control API rate limiting.
 
 ### Run Full Pipeline
 ```bash

@@ -43,6 +43,7 @@ class IncrementalEnricher:
         # Rate limiting delays
         self.chembl_delay = float(os.getenv('CHEMBL_DELAY_SECONDS', '0.05'))
         self.pubmed_delay = float(os.getenv('PUBMED_DELAY_SECONDS', '0.1'))
+        self.perplexity_delay = float(os.getenv('PERPLEXITY_DELAY_SECONDS', '1.0'))
 
     def enrich_all_pending(self):
         """Enrich all trials with pending stages"""
@@ -486,6 +487,8 @@ class IncrementalEnricher:
         try:
             nct_id = trial['nct_id']
             drug_name = trial['drug_name']
+            sponsor = trial.get('sponsor', '')
+            start_date = trial.get('start_date', '')
 
             # Source 1: AACT Detailed Description
             description = self.get_aact_detailed_description(nct_id)
@@ -500,8 +503,28 @@ class IncrementalEnricher:
             ct_data = self.search_clinicaltrials_api(nct_id)
 
             # Source 5: Company Website Search URLs
-            sponsor = trial.get('sponsor', '')
             company_search = self.generate_company_search_urls(sponsor, nct_id, drug_name)
+
+            # Source 6: External safety signals via Perplexity AI
+            external_signals = {}
+
+            # Only query Perplexity if we have API key and sponsor info
+            if os.getenv('PERPLEXITY_API_KEY') and sponsor:
+                print(f"    🔍 Searching external safety signals via Perplexity...")
+
+                # FDA warnings and clinical holds
+                fda_warnings = self.search_fda_warnings(drug_name, sponsor)
+                external_signals['fda_warnings'] = fda_warnings
+
+                # SEC filings (if publicly traded company)
+                sec_filings = self.search_sec_filings(sponsor, nct_id, start_date)
+                external_signals['sec_filings'] = sec_filings
+
+                # Company disclosures and press releases
+                company_disclosures = self.scrape_company_disclosures(sponsor, nct_id, drug_name)
+                external_signals['company_disclosures'] = company_disclosures
+            else:
+                external_signals['note'] = 'Skipped - PERPLEXITY_API_KEY not set or no sponsor info'
 
             self.trials_table.update(
                 {'failure_enrichment': {
@@ -509,7 +532,8 @@ class IncrementalEnricher:
                     'aact_documents': documents,
                     'pubmed_results': pubmed,
                     'clinicaltrials_api': ct_data,
-                    'company_search_urls': company_search
+                    'company_search_urls': company_search,
+                    'external_signals': external_signals
                  },
                  'enrichment_status': {
                      **trial['enrichment_status'],
@@ -772,7 +796,7 @@ class IncrementalEnricher:
             if not perplexity_api_key:
                 return {'found': False, 'error': 'PERPLEXITY_API_KEY not set'}
 
-            safe_sleep(1.0)  # Rate limiting
+            safe_sleep(getattr(self, 'perplexity_delay', 1.0))  # Rate limiting
 
             response = requests.post(
                 'https://api.perplexity.ai/chat/completions',
@@ -842,7 +866,7 @@ class IncrementalEnricher:
 
     def search_sec_filings(self, sponsor: str, nct_id: str, start_date: str) -> Dict:
         """
-        Search SEC EDGAR for 8-K filings mentioning trial or safety issues
+        Search SEC EDGAR for 8-K filings mentioning trial or safety issues via Perplexity
 
         Args:
             sponsor: Company name
@@ -853,67 +877,79 @@ class IncrementalEnricher:
             Dict with SEC filing findings
         """
         try:
-            # SEC EDGAR has a public API
-            # We'd search for 8-K filings (material events) around trial dates
-            # that mention the NCT ID or safety-related keywords
+            query = f"SEC EDGAR 8-K filings by {sponsor} mentioning clinical trial {nct_id} or related drug safety issues. Include filing dates, CIK number, and specific material events disclosed."
 
-            sec_signals = {
-                'found': False,
-                'filings_8k': [],
-                'filings_10k': [],
-                'search_params': {
-                    'company': sponsor,
-                    'nct_id': nct_id,
-                    'start_date': start_date
-                },
-                'note': 'SEC EDGAR scraping not yet implemented - requires CIK lookup and filing parsing'
-            }
+            result = self.query_perplexity(query)
 
-            # Future implementation:
-            # 1. Look up company CIK (Central Index Key) from sponsor name
-            # 2. Query SEC EDGAR API for 8-K filings after trial start date
-            # 3. Download and parse filings for NCT ID or safety keywords
-            # 4. Extract relevant safety disclosures
-
-            return sec_signals
+            if result.get('found'):
+                return {
+                    'found': True,
+                    'search_query': query,
+                    'search_params': {
+                        'company': sponsor,
+                        'nct_id': nct_id,
+                        'start_date': start_date
+                    },
+                    'findings': result['answer'],
+                    'citations': result.get('citations', []),
+                    'source': 'perplexity_ai'
+                }
+            else:
+                return {
+                    'found': False,
+                    'search_query': query,
+                    'search_params': {
+                        'company': sponsor,
+                        'nct_id': nct_id,
+                        'start_date': start_date
+                    },
+                    'error': result.get('error', 'No results')
+                }
 
         except Exception as e:
             return {'found': False, 'error': str(e)}
 
-    def scrape_company_disclosures(self, search_urls: List[str], drug_name: str) -> Dict:
+    def scrape_company_disclosures(self, sponsor: str, nct_id: str, drug_name: str) -> Dict:
         """
-        Scrape company websites/press releases for safety disclosures
+        Search company websites/press releases for safety disclosures via Perplexity
 
         Args:
-            search_urls: List of Google search URLs for company + trial
-            drug_name: Drug name to look for in content
+            sponsor: Company name
+            nct_id: Trial NCT ID
+            drug_name: Drug name to search
 
         Returns:
-            Dict with scraped safety disclosure findings
+            Dict with company disclosure findings
         """
         try:
-            # This would use web scraping to:
-            # 1. Follow search URLs to find company press releases
-            # 2. Parse press releases for safety-related keywords
-            # 3. Extract structured SAE information where possible
+            query = f"Company press releases, investor presentations, or public statements by {sponsor} about clinical trial {nct_id} for {drug_name}. Focus on safety issues, adverse events, trial termination reasons, or regulatory actions."
 
-            company_signals = {
-                'found': False,
-                'press_releases': [],
-                'investor_presentations': [],
-                'safety_keywords_found': [],
-                'search_urls': search_urls,
-                'note': 'Company website scraping not yet implemented - requires robust web scraping with rate limiting'
-            }
+            result = self.query_perplexity(query)
 
-            # Future implementation:
-            # 1. Use requests + BeautifulSoup to fetch search results
-            # 2. Follow links to company IR pages
-            # 3. Parse press releases for safety keywords (deaths, SAE, toxicity, adverse events)
-            # 4. Extract structured data where format allows
-            # 5. Store raw HTML and extracted text for LLM analysis
-
-            return company_signals
+            if result.get('found'):
+                return {
+                    'found': True,
+                    'search_query': query,
+                    'search_params': {
+                        'company': sponsor,
+                        'nct_id': nct_id,
+                        'drug_name': drug_name
+                    },
+                    'findings': result['answer'],
+                    'citations': result.get('citations', []),
+                    'source': 'perplexity_ai'
+                }
+            else:
+                return {
+                    'found': False,
+                    'search_query': query,
+                    'search_params': {
+                        'company': sponsor,
+                        'nct_id': nct_id,
+                        'drug_name': drug_name
+                    },
+                    'error': result.get('error', 'No results')
+                }
 
         except Exception as e:
             return {'found': False, 'error': str(e)}
