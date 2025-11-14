@@ -6,6 +6,19 @@
 
 This pipeline extracts Phase 1, 2, and 3 terminated clinical trials (2010+) from the AACT database, enriches them with ChEMBL/UniProt targets and PPI networks, classifies failure reasons using Claude AI, and exports ML-ready datasets for Synthyra's PPI prediction model.
 
+## Methodology & Goals
+
+1. **Goal.** Assemble terminated/suspended/withdrawn trials with enough mechanistic signal (targets, IC50s, PPIs) and clear failure reasons so Logan can replay Synthyra’s SynteractTurbo model against historical safety/efficacy outcomes.
+2. **Data path.**
+   - Pull trial metadata from AACT (bulk or targeted by NCT list).
+   - Enrich targets (PubChem→ChEMBL→UniProt), build STRING PPIs, harvest failure evidence (AACT descriptions, CT.gov API, PubMed, Perplexity for FDA/SEC/company statements).
+   - Run Claude with heuristics/self-verification to classify failures (`FAILURE_SAFETY/EFFICACY/ADMINISTRATIVE`).
+   - Export full and validation datasets; validation mode enforces UniProt+PPI coverage and high-confidence labels.
+3. **Safety cohorts.** `scripts/find_safety_failures.py` is our discovery tool: it queries AACT for safety-related `why_stopped` text (optional phase filters) so we can curate toxicity-heavy samples. We currently track:
+   - A small all-phase sample (`data/clinical_trials.json`) for smoke tests.
+   - A safety-focused slice (`data/safety_trials_top20.json`) for early PPI validation.
+   - Per-phase TinyDBs (`data/phase{1,2,3}_trials.json`) with ≥20 validation-ready samples each, ensuring Logan has balanced cohorts when replaying SynteractTurbo.
+
 ### Key Features
 
 - **Database-First Architecture**: TinyDB-based storage with incremental enrichment
