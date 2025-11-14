@@ -14,19 +14,50 @@ SAFETY_KEYWORDS = [
     "toxic",
     "adverse",
     "ae",
+    "sae",
     "death",
     "fatal",
     "hepatotoxic",
     "liver",
     "cardiac",
     "qt prolongation",
-    "dose limiting"
+    "dose limiting",
+    "dlt",
+    "hold",
+    "pause",
+    "risk",
+    "review of safety",
+    "safety review",
+    "irb",
 ]
 
 
-def fetch_safety_trials(limit: int = 100) -> list[dict]:
+def fetch_safety_trials(
+    limit: int = 100,
+    phases: list[str] | None = None,
+    require_keywords: bool = True,
+) -> list[dict]:
     """Query AACT for terminated/suspended/withdrawn trials citing safety-related reasons."""
-    placeholders = " OR ".join(["why_stopped ILIKE %s" for _ in SAFETY_KEYWORDS])
+    where_clauses = [
+        "s.overall_status IN ('TERMINATED','SUSPENDED','WITHDRAWN')",
+        "s.why_stopped IS NOT NULL",
+    ]
+    params: list[str | int] = []
+
+    if require_keywords:
+        placeholders = " OR ".join(["s.why_stopped ILIKE %s" for _ in SAFETY_KEYWORDS])
+        where_clauses.append(f"({placeholders})")
+        params.extend(SAFETY_KEYWORDS)
+
+    if phases:
+        phase_clauses = []
+        for phase in phases:
+            phase_clauses.append("s.phase ILIKE %s")
+            params.append(f"%{phase.upper()}%")
+        where_clauses.append(f"({' OR '.join(phase_clauses)})")
+
+    where_sql = " AND ".join(where_clauses)
+
     sql = f"""
         SELECT
             s.nct_id,
@@ -41,9 +72,7 @@ def fetch_safety_trials(limit: int = 100) -> list[dict]:
         LEFT JOIN ctgov.sponsors sp
             ON s.nct_id = sp.nct_id
             AND sp.lead_or_collaborator = 'lead'
-        WHERE s.overall_status IN ('TERMINATED','SUSPENDED','WITHDRAWN')
-          AND s.why_stopped IS NOT NULL
-          AND ({placeholders})
+        WHERE {where_sql}
         ORDER BY s.completion_date DESC NULLS LAST
         LIMIT %s
     """
@@ -56,7 +85,7 @@ def fetch_safety_trials(limit: int = 100) -> list[dict]:
         password=os.environ["AACT_DB_PASSWORD"],
     )
     cur = conn.cursor()
-    cur.execute(sql, SAFETY_KEYWORDS + [limit])
+    cur.execute(sql, params + [limit])
 
     rows = cur.fetchall()
     cur.close()
@@ -117,10 +146,24 @@ def main():
         default=f"data/safety_failures_{datetime.utcnow().date()}.csv",
         help="Output CSV path",
     )
+    parser.add_argument(
+        "--phase",
+        action="append",
+        help="Phase filter (can specify multiple, e.g., --phase PHASE1 --phase PHASE2)",
+    )
+    parser.add_argument(
+        "--no-keywords",
+        action="store_true",
+        help="Do not require safety keywords in why_stopped",
+    )
     args = parser.parse_args()
 
     os.makedirs(os.path.dirname(args.output), exist_ok=True)
-    rows = fetch_safety_trials(limit=args.limit)
+    rows = fetch_safety_trials(
+        limit=args.limit,
+        phases=args.phase,
+        require_keywords=not args.no_keywords,
+    )
     save_csv(rows, args.output)
 
     print(f"✅ Found {len(rows)} safety-related terminated trials")

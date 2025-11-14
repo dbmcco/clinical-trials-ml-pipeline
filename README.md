@@ -275,6 +275,16 @@ python scripts/monitor_progress.py --db data/clinical_trials.json --refresh 5
   - `data/safety_validation_dataset.json` keeps the 22 rows that meet strict completeness.
 - **Usage:** These files give Logan a concrete safety-focused cohort to evaluate whether PPI features surface toxicity risks. Continue expanding by rerunning the script and extraction with different slices of `data/safety_failures.csv`.
 
+## Phase-Specific Samples (Nov 16, 2025)
+- **Goal:** Provide Logan with ~20 usable samples per phase (1–3) drawn from safety-flagged trials. For each phase we pulled ~30 unique NCT IDs, ran the full pipeline, and exported both full and validation datasets.
+- **Inputs:** `data/phase{1,2,3}_nct_list.csv` record the NCT IDs ingested for each phase. The matching TinyDBs are `data/phase{1,2,3}_trials.json`.
+- **Outputs:**  
+  - `data/phase1_ml_dataset.json` / `data/phase1_validation_dataset.json` (48 validation rows).  
+  - `data/phase2_ml_dataset.json` / `data/phase2_validation_dataset.json` (44 validation rows).  
+  - `data/phase3_ml_dataset.json` / `data/phase3_validation_dataset.json` (60 validation rows).  
+  Validation mode enforces UniProt/PPI completeness and high confidence, so each file exceeds the 20-sample target per phase.
+- **Next steps:** Filter these datasets for trials labeled `FAILURE_SAFETY` if Logan only wants safety-driven failures (Phase 1 currently has 9, Phase 2 has 5, Phase 3 has 0). Use `scripts/find_safety_failures.py --phase PHASEX --limit ...` to source more candidates if needed.
+
 ## Architecture
 
 See `docs/ARCHITECTURE.md` for complete system architecture, including:
