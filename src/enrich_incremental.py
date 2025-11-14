@@ -2,6 +2,7 @@
 
 import os
 import sys
+import re
 import requests
 import psycopg2
 from datetime import datetime
@@ -44,6 +45,7 @@ class IncrementalEnricher:
         self.chembl_delay = float(os.getenv('CHEMBL_DELAY_SECONDS', '0.05'))
         self.pubmed_delay = float(os.getenv('PUBMED_DELAY_SECONDS', '0.1'))
         self.perplexity_delay = float(os.getenv('PERPLEXITY_DELAY_SECONDS', '1.0'))
+        self.perplexity_model = os.getenv('PERPLEXITY_MODEL', 'sonar-small-online')
 
     def enrich_all_pending(self):
         """Enrich all trials with pending stages"""
@@ -134,27 +136,43 @@ class IncrementalEnricher:
         Returns:
             ChEMBL enrichment data
         """
-        # Try synonym normalization via PubChem first
         normalized_name = self.normalize_drug_name(drug_name)
-        search_name = normalized_name if normalized_name else drug_name
+        search_candidates = []
+        if normalized_name and normalized_name.lower() != drug_name.lower():
+            search_candidates.append(normalized_name)
+        search_candidates.append(drug_name)
 
-        # Search for molecule
+        for search_name in search_candidates:
+            chembl_result = self._search_chembl_entry(search_name)
+            if not chembl_result.get('found'):
+                continue
+
+            pref_name = chembl_result.get('pref_name') or ''
+            if self._names_compatible(drug_name, pref_name):
+                chembl_result['search_name'] = search_name
+                return chembl_result
+
+            # If mismatch and we still have the original drug name left to try, continue loop
+
+        # If all attempts failed or mismatched, return not found
+        return {"found": False, "chembl_id": None, "targets": [], "search_name": drug_name}
+
+    def _search_chembl_entry(self, search_name: str) -> Dict:
+        """Helper to search ChEMBL and build enrichment record for a specific query."""
         search_url = f"https://www.ebi.ac.uk/chembl/api/data/molecule/search?q={search_name}&format=json"
         safe_sleep(self.chembl_delay)
 
         response = requests.get(search_url, timeout=10)
         if response.status_code != 200:
-            return {"found": False, "chembl_id": None, "targets": [], "search_name": search_name}
+            return {"found": False}
 
         data = response.json()
         if not data.get('molecules'):
-            return {"found": False, "chembl_id": None, "targets": [], "search_name": search_name}
+            return {"found": False}
 
         molecule = data['molecules'][0]
         chembl_id = molecule['molecule_chembl_id']
-        pref_name = molecule.get('pref_name', drug_name)
-
-        # Get targets and IC50 data
+        pref_name = molecule.get('pref_name', search_name)
         targets = self.get_chembl_targets(chembl_id)
 
         return {
@@ -162,9 +180,24 @@ class IncrementalEnricher:
             "chembl_id": chembl_id,
             "pref_name": pref_name,
             "targets": targets,
-            "has_uniprot_targets": any(t.get('uniprot_id') for t in targets),
-            "search_name": search_name
+            "has_uniprot_targets": any(t.get('uniprot_id') for t in targets)
         }
+
+    def _names_compatible(self, requested: str, chembl_name: str) -> bool:
+        """Heuristic check to make sure the ChEMBL hit matches the requested drug."""
+        if not chembl_name:
+            return False
+
+        def normalize(name: str) -> str:
+            return re.sub(r'[^a-z0-9]', '', name.lower())
+
+        requested_clean = normalize(requested)
+        chembl_clean = normalize(chembl_name)
+
+        if not requested_clean or not chembl_clean:
+            return True
+
+        return requested_clean in chembl_clean or chembl_clean in requested_clean
 
     def get_chembl_targets(self, chembl_id: str) -> List[Dict]:
         """
@@ -805,9 +838,9 @@ class IncrementalEnricher:
                     'Content-Type': 'application/json'
                 },
                 json={
-                    'model': 'llama-3.1-sonar-small-128k-online',
+                    'model': self.perplexity_model,
                     'messages': [
-                        {'role': 'system', 'content': 'You are a research assistant searching for clinical trial safety information. Provide specific facts with citations.'},
+                        {'role': 'system', 'content': 'You are a research assistant searching for clinical trial safety information. Provide factual answers with citations.'},
                         {'role': 'user', 'content': query}
                     ],
                     'temperature': 0.2,
@@ -825,7 +858,11 @@ class IncrementalEnricher:
                     'model': data['model']
                 }
             else:
-                return {'found': False, 'error': f'API error: {response.status_code}'}
+                return {
+                    'found': False,
+                    'error': f'API error: {response.status_code}',
+                    'details': response.text
+                }
 
         except Exception as e:
             return {'found': False, 'error': str(e)}
@@ -877,6 +914,13 @@ class IncrementalEnricher:
             Dict with SEC filing findings
         """
         try:
+            if not self._looks_like_public_company(sponsor):
+                return {
+                    'found': False,
+                    'search_params': {'company': sponsor},
+                    'note': 'Skipped SEC search (sponsor not public company)'
+                }
+
             query = f"SEC EDGAR 8-K filings by {sponsor} mentioning clinical trial {nct_id} or related drug safety issues. Include filing dates, CIK number, and specific material events disclosed."
 
             result = self.query_perplexity(query)
@@ -922,6 +966,9 @@ class IncrementalEnricher:
             Dict with company disclosure findings
         """
         try:
+            if not sponsor:
+                return {'found': False, 'error': 'No sponsor provided'}
+
             query = f"Company press releases, investor presentations, or public statements by {sponsor} about clinical trial {nct_id} for {drug_name}. Focus on safety issues, adverse events, trial termination reasons, or regulatory actions."
 
             result = self.query_perplexity(query)
@@ -953,6 +1000,18 @@ class IncrementalEnricher:
 
         except Exception as e:
             return {'found': False, 'error': str(e)}
+
+    def _looks_like_public_company(self, sponsor: str) -> bool:
+        """Heuristic to determine if SEC searches make sense (skip obvious academic/government sponsors)."""
+        if not sponsor:
+            return False
+
+        sponsor_lower = sponsor.lower()
+        academic_terms = ['university', 'college', 'hospital', 'institute', 'nih', 'center']
+        if any(term in sponsor_lower for term in academic_terms):
+            return False
+
+        return True
 
     def generate_company_search_urls(self, sponsor: str, nct_id: str, drug_name: str) -> List[str]:
         """Generate company website search URLs"""

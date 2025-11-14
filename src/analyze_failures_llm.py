@@ -171,8 +171,10 @@ class FailureAnalyzer:
             self.total_tokens += tokens_used
             self.total_cost += self.calculate_cost(tokens_used)
 
+            final_category = verification.get('revised_category') or initial_classification['category']
+
             llm_analysis = {
-                'classification': verification.get('revised_category', initial_classification['category']),
+                'classification': final_category,
                 'confidence': verification['confidence'],
                 'reasoning': initial_classification['reasoning'],
                 'verification_passed': verification['passed'],
