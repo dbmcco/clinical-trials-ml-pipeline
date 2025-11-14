@@ -39,6 +39,34 @@ This pipeline extracts Phase 1, 2, and 3 terminated clinical trials (2010+) from
 ## Goal
 Build a comprehensive dataset of Phase 1, 2, and 3 terminated trials with known protein targets and failure reasons. This dataset will be used to **validate** Synthyra's SynteractTurbo PPI prediction model by testing if it could have predicted which molecules would fail based on their protein interaction patterns.
 
+## Quick Start for Collaborators (e.g., David)
+
+1. **Requirements**
+   - Python 3.9+ (repository tested with 3.9/3.10/3.11).
+   - Access to the AACT PostgreSQL replica (host/user/password).
+   - API keys: `ANTHROPIC_API_KEY` (Claude), `PERPLEXITY_API_KEY` (optional but recommended for external safety searches).
+2. **Clone & environment**
+   ```bash
+   git clone https://github.com/dbmcco/clinical-trials-ml-pipeline.git
+   cd clinical-trials-ml-pipeline/cttrials
+   python3 -m venv venv
+   source venv/bin/activate
+   pip install -r requirements.txt
+   cp .env.example .env  # fill in AACT_* and API keys
+   ```
+3. **Run a sample pipeline**
+   ```bash
+   # Pull a safety-focused list (Phase 1 example)
+   python scripts/find_safety_failures.py --phase PHASE1 --limit 200 --output data/phase1_candidates.csv
+   python src/extract_aact_bulk.py --output data/phase1_trials.json --nct-list data/phase1_candidates.csv
+   python src/enrich_incremental.py --db data/phase1_trials.json --queue data/phase1_queue.json
+   python src/analyze_failures_llm.py --db data/phase1_trials.json --cache data/phase1_llm_cache.json
+   python src/export_ml_dataset.py --db data/phase1_trials.json --output data/phase1_ml_dataset.json
+   ```
+4. **Use existing datasets**
+   - `data/phase{1,2,3}_trials.json` + matching ML/validation *.json files are checked in. Logan can open them immediately without rerunning the pipeline.
+   - For a smaller smoke test use `data/clinical_trials.json` (9 arms) and `data/safety_trials_top20.json` (45 safety-heavy arms).
+
 ## Multi-Source Data Pipeline
 
 ### Data Sources
