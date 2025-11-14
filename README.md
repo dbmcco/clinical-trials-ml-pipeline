@@ -277,6 +277,16 @@ python scripts/monitor_progress.py --db data/clinical_trials.json --refresh 5
 
 ## Phase-Specific Samples (Nov 16, 2025)
 - **Goal:** Provide Logan with ~20 usable samples per phase (1–3) drawn from safety-flagged trials. For each phase we pulled ~30 unique NCT IDs, ran the full pipeline, and exported both full and validation datasets.
+- **How to reproduce quickly:**
+  ```bash
+  # Phase 1 example
+  python scripts/find_safety_failures.py --phase PHASE1 --limit 500 --output data/phase1_candidates.csv
+  python src/extract_aact_bulk.py --output data/phase1_trials.json --nct-list data/phase1_nct_list.csv
+  python src/enrich_incremental.py --db data/phase1_trials.json --queue data/phase1_queue.json
+  python src/analyze_failures_llm.py --db data/phase1_trials.json --cache data/phase1_llm_cache.json
+  python src/export_ml_dataset.py --db data/phase1_trials.json --output data/phase1_ml_dataset.json
+  python src/export_ml_dataset.py --db data/phase1_trials.json --output data/phase1_validation_dataset.json --validation-mode --min-confidence high
+  ```
 - **Inputs:** `data/phase{1,2,3}_nct_list.csv` record the NCT IDs ingested for each phase. The matching TinyDBs are `data/phase{1,2,3}_trials.json`.
 - **Outputs:**  
   - `data/phase1_ml_dataset.json` / `data/phase1_validation_dataset.json` (48 validation rows).  
