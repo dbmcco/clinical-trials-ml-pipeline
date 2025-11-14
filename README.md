@@ -201,7 +201,9 @@ pip install -r requirements.txt
 ### Environment Variables
 - `AACT_DB_HOST/PORT/NAME/USER/PASSWORD` – access to the ClinicalTrials.gov AACT PostgreSQL replica
 - `ANTHROPIC_API_KEY` – enables Stage 3 Claude-based failure classification
+- `ANTHROPIC_MODEL` *(optional)* – override the default `claude-3-haiku-20240307` model if you have access to a different Claude endpoint
 - `PERPLEXITY_API_KEY` *(optional but recommended)* – unlocks external FDA/SEC/company safety signal enrichment in Stage 2. Set `PERPLEXITY_DELAY_SECONDS` (default `1.0`) to control API rate limiting.
+- `PERPLEXITY_MODEL` *(optional)* – specify a valid Perplexity model ID once you have access (see https://docs.perplexity.ai/getting-started/models). The placeholder default will return HTTP 400 if your account is not entitled to the requested model.
 
 ### Run Full Pipeline
 ```bash
@@ -248,6 +250,17 @@ python src/export_ml_dataset.py --db data/test_trials.json --output data/test_da
 # Real-time progress tracking
 python scripts/monitor_progress.py --db data/clinical_trials.json --refresh 5
 ```
+
+## Latest Sample Dataset (Nov 14, 2025)
+- **Scope:** 3 trials per phase (total 9 arm-level entries) extracted from 2018+ AACT and stored in `data/clinical_trials.json`.
+- **Enrichment:** 5/9 arms have UniProt targets and STRING PPIs; the other 4 lack ChEMBL coverage (normal saline control arms, unnamed biologics, etc.).
+- **Classification:** Stage 3 (Claude Haiku) labels all entries as `FAILURE_ADMINISTRATIVE` with high confidence because each trial was withdrawn for strategic/funding reasons—no adverse-event failures are present yet.
+- **Exports:** `data/ml_dataset.json` contains all 9 arms; `data/validation_dataset.json` (strict mode) keeps the 5 rows that satisfy UniProt/PPI requirements. Both artifacts are tracked in git for Logan to review.
+- **Known gaps:** 
+  1. ClinicalTrials.gov SAE tables are missing for every entry, so heuristic safety overrides never fire.
+  2. Perplexity external-signal calls currently return HTTP 400 until a valid `PERPLEXITY_MODEL` value is provided; external findings therefore contain only error metadata.
+  3. Arm-level duplication inflates counts—consider collapsing multiple interventions per NCT ID before downstream analysis.
+  4. The dataset still lacks trials that failed due to adverse events/toxicity; sourcing SAE-positive trials is the next priority for the safety study.
 
 ## Architecture
 
