@@ -203,7 +203,7 @@ pip install -r requirements.txt
 - `ANTHROPIC_API_KEY` – enables Stage 3 Claude-based failure classification
 - `ANTHROPIC_MODEL` *(optional)* – override the default `claude-3-haiku-20240307` model if you have access to a different Claude endpoint
 - `PERPLEXITY_API_KEY` *(optional but recommended)* – unlocks external FDA/SEC/company safety signal enrichment in Stage 2. Set `PERPLEXITY_DELAY_SECONDS` (default `1.0`) to control API rate limiting.
-- `PERPLEXITY_MODEL` *(optional)* – specify a valid Perplexity model ID once you have access (see https://docs.perplexity.ai/getting-started/models). The placeholder default will return HTTP 400 if your account is not entitled to the requested model.
+- `PERPLEXITY_MODEL` *(optional)* – specify a valid Perplexity model ID (default `sonar-reasoning`). Override only if your account has access to another Perplexity model; invalid model names return HTTP 400.
 
 ### Run Full Pipeline
 ```bash

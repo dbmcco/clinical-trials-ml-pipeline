@@ -45,7 +45,7 @@ class IncrementalEnricher:
         self.chembl_delay = float(os.getenv('CHEMBL_DELAY_SECONDS', '0.05'))
         self.pubmed_delay = float(os.getenv('PUBMED_DELAY_SECONDS', '0.1'))
         self.perplexity_delay = float(os.getenv('PERPLEXITY_DELAY_SECONDS', '1.0'))
-        self.perplexity_model = os.getenv('PERPLEXITY_MODEL', 'sonar-small-online')
+        self.perplexity_model = os.getenv('PERPLEXITY_MODEL', 'sonar-reasoning')
 
     def enrich_all_pending(self):
         """Enrich all trials with pending stages"""
