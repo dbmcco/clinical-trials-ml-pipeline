@@ -755,6 +755,169 @@ class IncrementalEnricher:
 
         return dose_data
 
+    def query_perplexity(self, query: str) -> Dict:
+        """
+        Query Perplexity AI for web research with citations
+
+        Args:
+            query: Search query
+
+        Returns:
+            Dict with answer and citations
+        """
+        try:
+            import os
+            perplexity_api_key = os.getenv('PERPLEXITY_API_KEY')
+
+            if not perplexity_api_key:
+                return {'found': False, 'error': 'PERPLEXITY_API_KEY not set'}
+
+            safe_sleep(1.0)  # Rate limiting
+
+            response = requests.post(
+                'https://api.perplexity.ai/chat/completions',
+                headers={
+                    'Authorization': f'Bearer {perplexity_api_key}',
+                    'Content-Type': 'application/json'
+                },
+                json={
+                    'model': 'llama-3.1-sonar-small-128k-online',
+                    'messages': [
+                        {'role': 'system', 'content': 'You are a research assistant searching for clinical trial safety information. Provide specific facts with citations.'},
+                        {'role': 'user', 'content': query}
+                    ],
+                    'temperature': 0.2,
+                    'max_tokens': 500
+                },
+                timeout=30
+            )
+
+            if response.status_code == 200:
+                data = response.json()
+                return {
+                    'found': True,
+                    'answer': data['choices'][0]['message']['content'],
+                    'citations': data.get('citations', []),
+                    'model': data['model']
+                }
+            else:
+                return {'found': False, 'error': f'API error: {response.status_code}'}
+
+        except Exception as e:
+            return {'found': False, 'error': str(e)}
+
+    def search_fda_warnings(self, drug_name: str, sponsor: str) -> Dict:
+        """
+        Search FDA warning letters and clinical holds via Perplexity
+
+        Args:
+            drug_name: Drug name to search
+            sponsor: Sponsor/company name
+
+        Returns:
+            Dict with FDA warning findings
+        """
+        try:
+            query = f"FDA warning letters or clinical holds for {drug_name} by {sponsor}. Include specific dates, reasons, and safety issues cited."
+
+            result = self.query_perplexity(query)
+
+            if result.get('found'):
+                return {
+                    'found': True,
+                    'search_query': query,
+                    'findings': result['answer'],
+                    'citations': result.get('citations', []),
+                    'source': 'perplexity_ai'
+                }
+            else:
+                return {
+                    'found': False,
+                    'search_query': query,
+                    'error': result.get('error', 'No results')
+                }
+
+        except Exception as e:
+            return {'found': False, 'error': str(e)}
+
+    def search_sec_filings(self, sponsor: str, nct_id: str, start_date: str) -> Dict:
+        """
+        Search SEC EDGAR for 8-K filings mentioning trial or safety issues
+
+        Args:
+            sponsor: Company name
+            nct_id: Trial NCT ID
+            start_date: Trial start date for filtering filings
+
+        Returns:
+            Dict with SEC filing findings
+        """
+        try:
+            # SEC EDGAR has a public API
+            # We'd search for 8-K filings (material events) around trial dates
+            # that mention the NCT ID or safety-related keywords
+
+            sec_signals = {
+                'found': False,
+                'filings_8k': [],
+                'filings_10k': [],
+                'search_params': {
+                    'company': sponsor,
+                    'nct_id': nct_id,
+                    'start_date': start_date
+                },
+                'note': 'SEC EDGAR scraping not yet implemented - requires CIK lookup and filing parsing'
+            }
+
+            # Future implementation:
+            # 1. Look up company CIK (Central Index Key) from sponsor name
+            # 2. Query SEC EDGAR API for 8-K filings after trial start date
+            # 3. Download and parse filings for NCT ID or safety keywords
+            # 4. Extract relevant safety disclosures
+
+            return sec_signals
+
+        except Exception as e:
+            return {'found': False, 'error': str(e)}
+
+    def scrape_company_disclosures(self, search_urls: List[str], drug_name: str) -> Dict:
+        """
+        Scrape company websites/press releases for safety disclosures
+
+        Args:
+            search_urls: List of Google search URLs for company + trial
+            drug_name: Drug name to look for in content
+
+        Returns:
+            Dict with scraped safety disclosure findings
+        """
+        try:
+            # This would use web scraping to:
+            # 1. Follow search URLs to find company press releases
+            # 2. Parse press releases for safety-related keywords
+            # 3. Extract structured SAE information where possible
+
+            company_signals = {
+                'found': False,
+                'press_releases': [],
+                'investor_presentations': [],
+                'safety_keywords_found': [],
+                'search_urls': search_urls,
+                'note': 'Company website scraping not yet implemented - requires robust web scraping with rate limiting'
+            }
+
+            # Future implementation:
+            # 1. Use requests + BeautifulSoup to fetch search results
+            # 2. Follow links to company IR pages
+            # 3. Parse press releases for safety keywords (deaths, SAE, toxicity, adverse events)
+            # 4. Extract structured data where format allows
+            # 5. Store raw HTML and extracted text for LLM analysis
+
+            return company_signals
+
+        except Exception as e:
+            return {'found': False, 'error': str(e)}
+
     def generate_company_search_urls(self, sponsor: str, nct_id: str, drug_name: str) -> List[str]:
         """Generate company website search URLs"""
         if not sponsor:

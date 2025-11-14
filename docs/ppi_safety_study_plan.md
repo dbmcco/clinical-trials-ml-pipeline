@@ -1,5 +1,29 @@
 # PPI Safety Study Data Needs & Process Plan
 
+## Implementation Status (Updated 2025-11-13)
+
+**✅ COMPLETED:**
+- PubChem synonym normalization for target discovery
+- UniProt fallback enrichment
+- CT.gov SAE table parsing (adverseEventsModule)
+- CT.gov dose information extraction (armsInterventionsModule)
+- Heuristic safety overrides (deaths, SAE rate >10%)
+- Enhanced validation mode with SAE/dose requirements
+- PPI scorer hand-off script (`scripts/prepare_for_ppi_scorer.py`)
+- Updated LLM prompts with heuristic integration
+
+**🚧 IN PROGRESS:**
+- Perplexity AI integration for external safety signals
+- FDA warning letter search via Perplexity
+- SEC EDGAR 8-K filing research via Perplexity
+- Company disclosure scraping via Perplexity
+
+**📋 PENDING:**
+- DrugBank XML parser (fallback target source)
+- Full external signal integration into failure enrichment
+- LLM prompt updates to consume external signals
+- End-to-end validation with external signals
+
 ## Context
 - Study objective (README.md:24-26): Validate SynteractTurbo by replaying terminated Phase 1–3 trials and checking whether PPI features would have predicted adverse outcomes.
 - Current pipeline (`src/` executables + TinyDB store) already handles base extraction (AACT), enrichment (ChEMBL/STRING), LLM classification, and ML export, but it depends heavily on AACT fields and exposes only limited failure/dosing/assay information.
