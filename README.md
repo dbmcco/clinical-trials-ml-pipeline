@@ -66,6 +66,10 @@ Build a comprehensive dataset of Phase 1, 2, and 3 terminated trials with known 
 
 ```bash
 python src/extract_aact_bulk.py --output data/clinical_trials.json --start-year 2010 --stats
+# Or target specific trials (e.g., safety failures list)
+python src/extract_aact_bulk.py \
+  --output data/safety_trials_top20.json \
+  --nct-list data/safety_failures.csv
 ```
 
 **What it does:**
@@ -261,6 +265,15 @@ python scripts/monitor_progress.py --db data/clinical_trials.json --refresh 5
   2. Perplexity external-signal calls currently return HTTP 400 until a valid `PERPLEXITY_MODEL` value is provided; external findings therefore contain only error metadata.
   3. Arm-level duplication inflates counts—consider collapsing multiple interventions per NCT ID before downstream analysis.
   4. The dataset still lacks trials that failed due to adverse events/toxicity; sourcing SAE-positive trials is the next priority for the safety study.
+
+## Safety-Failure Dataset (Nov 15, 2025)
+- **Discovery:** `scripts/find_safety_failures.py` queries AACT for TERMINATED/SUSPENDED/WITHDRAWN trials whose `why_stopped` text mentions safety/toxicity keywords (see script for list). Run via `python scripts/find_safety_failures.py --limit 200 --output data/safety_failures.csv`.
+- **Extraction:** Use `extract_aact_bulk.py --nct-list data/safety_failures_top20.csv --output data/safety_trials_top20.json` to build a TinyDB focused on the top candidates.
+- **Pipeline status:** `data/safety_trials_top20.json` (45 arm-level records) is fully enriched, classified, and exported:
+  - Stage 3 labeled 42/45 arms as `FAILURE_SAFETY` (high confidence).
+  - `data/safety_ml_dataset.json` holds all 45 arms (62% with UniProt targets, 58% with PPIs).
+  - `data/safety_validation_dataset.json` keeps the 22 rows that meet strict completeness.
+- **Usage:** These files give Logan a concrete safety-focused cohort to evaluate whether PPI features surface toxicity risks. Continue expanding by rerunning the script and extraction with different slices of `data/safety_failures.csv`.
 
 ## Architecture
 

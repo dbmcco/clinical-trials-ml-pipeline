@@ -840,7 +840,13 @@ class IncrementalEnricher:
                 json={
                     'model': self.perplexity_model,
                     'messages': [
-                        {'role': 'system', 'content': 'You are a research assistant searching for clinical trial safety information. Provide factual answers with citations.'},
+                        {
+                            'role': 'system',
+                            'content': (
+                                'You are an investigator compiling external safety evidence for a specific clinical trial. '
+                                'Respond with a JSON summary containing status, summary, relevance, citations.'
+                            )
+                        },
                         {'role': 'user', 'content': query}
                     ],
                     'temperature': 0.2,
@@ -854,8 +860,8 @@ class IncrementalEnricher:
                 return {
                     'found': True,
                     'answer': data['choices'][0]['message']['content'],
-                    'citations': data.get('citations', []),
-                    'model': data['model']
+                    'model': data.get('model'),
+                    'usage': data.get('usage')
                 }
             else:
                 return {
@@ -884,13 +890,7 @@ class IncrementalEnricher:
             result = self.query_perplexity(query)
 
             if result.get('found'):
-                return {
-                    'found': True,
-                    'search_query': query,
-                    'findings': result['answer'],
-                    'citations': result.get('citations', []),
-                    'source': 'perplexity_ai'
-                }
+                return self._parse_perplexity_answer(result, query)
             else:
                 return {
                     'found': False,
@@ -926,18 +926,10 @@ class IncrementalEnricher:
             result = self.query_perplexity(query)
 
             if result.get('found'):
-                return {
-                    'found': True,
-                    'search_query': query,
-                    'search_params': {
-                        'company': sponsor,
-                        'nct_id': nct_id,
-                        'start_date': start_date
-                    },
-                    'findings': result['answer'],
-                    'citations': result.get('citations', []),
-                    'source': 'perplexity_ai'
-                }
+                return self._parse_perplexity_answer(
+                    result, query,
+                    {'search_params': {'company': sponsor, 'nct_id': nct_id, 'start_date': start_date}}
+                )
             else:
                 return {
                     'found': False,
@@ -974,18 +966,10 @@ class IncrementalEnricher:
             result = self.query_perplexity(query)
 
             if result.get('found'):
-                return {
-                    'found': True,
-                    'search_query': query,
-                    'search_params': {
-                        'company': sponsor,
-                        'nct_id': nct_id,
-                        'drug_name': drug_name
-                    },
-                    'findings': result['answer'],
-                    'citations': result.get('citations', []),
-                    'source': 'perplexity_ai'
-                }
+                return self._parse_perplexity_answer(
+                    result, query,
+                    {'search_params': {'company': sponsor, 'nct_id': nct_id, 'drug_name': drug_name}}
+                )
             else:
                 return {
                     'found': False,
@@ -1000,6 +984,28 @@ class IncrementalEnricher:
 
         except Exception as e:
             return {'found': False, 'error': str(e)}
+
+    def _parse_perplexity_answer(self, result: Dict, query: str, extra: Optional[Dict] = None) -> Dict:
+        """Parse Perplexity JSON answer content."""
+        answer = result.get('answer', '') or ''
+        try:
+            data = json.loads(answer)
+            return {
+                'found': data.get('status', '').lower() == 'found',
+                'search_query': query,
+                'summary': data.get('summary'),
+                'relevance': data.get('relevance'),
+                'citations': data.get('citations', []),
+                **(extra or {})
+            }
+        except Exception:
+            return {
+                'found': True,
+                'search_query': query,
+                'summary': answer,
+                'citations': [],
+                **(extra or {})
+            }
 
     def _looks_like_public_company(self, sponsor: str) -> bool:
         """Heuristic to determine if SEC searches make sense (skip obvious academic/government sponsors)."""

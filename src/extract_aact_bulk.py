@@ -2,6 +2,7 @@
 
 import os
 import sys
+import csv
 import psycopg2
 from datetime import datetime
 from typing import List, Dict, Optional
@@ -136,6 +137,60 @@ class AACTBulkExtractor:
             }
         }
 
+    def extract_specific_trials(self, nct_ids: List[str]) -> int:
+        """
+        Extract a specific list of trials by NCT ID.
+
+        Args:
+            nct_ids: List of NCT identifiers
+
+        Returns:
+            Number of trials extracted
+        """
+        if not nct_ids:
+            print("No NCT IDs provided.")
+            return 0
+
+        query = """
+            SELECT DISTINCT
+                s.nct_id,
+                s.brief_title as title,
+                s.phase,
+                s.overall_status,
+                s.why_stopped,
+                s.start_date,
+                s.completion_date,
+                i.name as drug_name,
+                i.intervention_type,
+                i.description as drug_description,
+                sp.name as sponsor
+            FROM ctgov.studies s
+            JOIN ctgov.interventions i ON s.nct_id = i.nct_id
+            LEFT JOIN ctgov.sponsors sp ON s.nct_id = sp.nct_id
+                AND sp.lead_or_collaborator = 'lead'
+            WHERE s.nct_id = ANY(%s)
+            ORDER BY s.start_date DESC
+        """
+
+        print(f"Extracting {len(nct_ids)} specified trials...")
+
+        cursor = self.aact_conn.cursor()
+        cursor.execute(query, (nct_ids,))
+
+        trials_extracted = 0
+        for row in cursor.fetchall():
+            trial = self._build_trial_document(row)
+            self.trials_table.insert(trial)
+            trials_extracted += 1
+
+            if trials_extracted % 50 == 0:
+                print(f"Extracted {trials_extracted} trials...")
+
+        cursor.close()
+
+        print(f"\n✅ Extraction complete: {trials_extracted} trials saved to {self.db_path}")
+        return trials_extracted
+
     def get_statistics(self) -> Dict:
         """
         Get extraction statistics
@@ -169,6 +224,22 @@ class AACTBulkExtractor:
         self.db.close()
 
 
+def load_nct_ids(path: str) -> List[str]:
+    """
+    Load NCT IDs from CSV or text file.
+    """
+    ids = []
+    with open(path, 'r') as fh:
+        reader = csv.reader(fh)
+        for row in reader:
+            if not row:
+                continue
+            val = row[0].strip()
+            if val.upper().startswith('NCT'):
+                ids.append(val.upper())
+    return ids
+
+
 def main():
     """Main entry point for bulk extraction"""
     parser = argparse.ArgumentParser(
@@ -192,6 +263,10 @@ def main():
         help='Limit number of trials for testing (default: None = all trials)'
     )
     parser.add_argument(
+        '--nct-list',
+        help='Path to CSV or text file with NCT IDs (first column or line)'
+    )
+    parser.add_argument(
         '--stats',
         action='store_true',
         help='Show database statistics after extraction'
@@ -202,14 +277,17 @@ def main():
     # Create data directory if it doesn't exist
     os.makedirs(os.path.dirname(args.output), exist_ok=True)
 
-    # Extract trials
     extractor = AACTBulkExtractor(db_path=args.output)
 
     try:
-        count = extractor.extract_all_trials(
-            start_year=args.start_year,
-            limit=args.limit
-        )
+        if args.nct_list:
+            nct_ids = load_nct_ids(args.nct_list)
+            count = extractor.extract_specific_trials(nct_ids)
+        else:
+            count = extractor.extract_all_trials(
+                start_year=args.start_year,
+                limit=args.limit
+            )
 
         if args.stats:
             print("\n" + "="*50)
